@@ -1,9 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server'
-import OpenAI from 'openai'
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-})
 
 // Brand database with real shade numbers
 const BRAND_SHADES: Record<string, Array<{number: string, name: string, color: string, effect: string, scene: string}>> = {
@@ -70,6 +65,19 @@ const BRAND_SHADES: Record<string, Array<{number: string, name: string, color: s
   ],
 }
 
+const BRAND_NAMES: Record<string, string> = {
+  dior: 'Dior 迪奥',
+  chanel: 'Chanel 香奈儿',
+  ysl: 'YSL 圣罗兰',
+  mac: 'MAC 魅可',
+  tomford: 'Tom Ford',
+  armani: 'Armani 阿玛尼',
+  lancome: 'Lancôme 兰蔻',
+  gucci: 'Gucci 古驰',
+  givenchy: 'Givenchy 纪梵希',
+  charlottetilbury: 'Charlotte Tilbury',
+}
+
 export async function POST(request: NextRequest) {
   try {
     const { image, brand } = await request.json()
@@ -81,40 +89,106 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Step 1: Analyze image with GPT-4o Vision
-    const analysisResponse = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [
-        {
-          role: 'system',
-          content: `你是一个高端美妆顾问。请分析用户自拍照片，输出以下信息（JSON格式）：
+    // Step 1: Analyze image with Doubao vision model
+    const brandShades = BRAND_SHADES[brand] || BRAND_SHADES['mac']
+    const brandName = BRAND_NAMES[brand] || brand
+
+    // Build the prompt with user's exact template
+    const shadesText = brandShades.map((s, i) => 
+      `${i+1}. ${s.number} ${s.name} - ${s.effect} - ${s.scene}`
+    ).join('\n')
+
+    const analysisPrompt = `你是一个高端美妆顾问 + 信息结构设计系统，
+
+基于用户上传的自拍图像与指定口红品牌，
+生成一张「口红推荐分析报告信息图」（9:16竖版）。
+
+目标不是单纯展示，而是提供"清晰、有用、可决策"的推荐结果，
+同时具备高级感与女性审美友好界面。
+
+————————————
+一、分析任务（先完成逻辑判断）
+
+请分析用户：
+
+1. 肤色（冷调 / 暖调 / 中性）
+2. 明度（白皙 / 自然 / 偏深）
+3. 气质（清冷 / 温柔 / 成熟 / 明艳 / 氛围感）
+4. 唇部基础（唇色深浅、适合浓淡）
+
+输出总结：
+「该用户适合：{色系} + {明度} + {风格} 的口红」
+
+————————————
+二、色号推荐（品牌绑定）
+
+从 ${brandName} 中推荐 3–5 个色号，每个包含：
+
+* 色号编号（如 999）
+* 色系名称（如 经典正红 / 枫叶棕 / 奶茶裸色）
+* 上脸效果（显白 / 提气色 / 气质增强）
+* 适用场景（如：通勤 / 逛街 / 约会 / 聚餐 / 宴会）
+
+确保推荐具有差异性（不要全部同一色系）
+
+可用色号库：
+${shadesText}
+
+请输出分析结果和推荐列表（JSON格式）：
 {
   "skinTone": "冷调/暖调/中性",
-  "brightness": "白皙/自然/偏深",
+  "brightness": "白皙/自然/偏深", 
   "vibe": "清冷/温柔/成熟/明艳/氛围感",
-  "lipBase": "唇色深浅、适合浓淡",
-  "summary": "该用户适合：{色系} + {明度} + {风格} 的口红"
+  "lipBase": "描述",
+  "summary": "该用户适合：{色系} + {明度} + {风格} 的口红",
+  "recommendations": [
+    {"number": "色号", "name": "色系名称", "effect": "上脸效果", "scene": "适用场景", "color": "#HEX"}
+  ]
 }`
-        },
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: '请分析这张照片的肤色、气质和唇部特征，给出口红推荐建议。' },
-            { type: 'image_url', image_url: { url: image } }
-          ]
-        }
-      ],
-      max_tokens: 500,
+
+    // Call Doubao vision API for analysis
+    const analysisResponse = await fetch('https://ark.cn-beijing.volces.com/api/v3/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.DOUBAO_API_KEY || ''}`,
+      },
+      body: JSON.stringify({
+        model: 'doubao-vision-pro-32k-241028',
+        messages: [
+          {
+            role: 'system',
+            content: analysisPrompt
+          },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: '请分析这张照片，给出口红推荐建议。' },
+              { type: 'image_url', image_url: { url: image } }
+            ]
+          }
+        ],
+        max_tokens: 2000,
+      })
     })
 
-    const analysisText = analysisResponse.choices[0]?.message?.content || ''
+    if (!analysisResponse.ok) {
+      const errorData = await analysisResponse.text()
+      throw new Error(`分析失败: ${errorData}`)
+    }
+
+    const analysisData = await analysisResponse.json()
+    const analysisText = analysisData.choices?.[0]?.message?.content || ''
     
-    // Parse analysis
+    // Parse analysis JSON
     let analysis: any = {}
+    let recommendations: any[] = []
+    
     try {
       const jsonMatch = analysisText.match(/\{[\s\S]*\}/)
       if (jsonMatch) {
         analysis = JSON.parse(jsonMatch[0])
+        recommendations = analysis.recommendations || []
       }
     } catch {
       analysis = { summary: analysisText }
@@ -122,56 +196,70 @@ export async function POST(request: NextRequest) {
 
     const summary = analysis.summary || analysisText
 
-    // Step 2: Get brand shades
-    const brandShades = BRAND_SHADES[brand] || BRAND_SHADES['mac']
-    
-    // Select 3-5 shades based on analysis
-    const selectedShades = brandShades.slice(0, 4)
+    // If no recommendations parsed, use default brand shades
+    if (recommendations.length === 0) {
+      recommendations = brandShades.slice(0, 4)
+    }
 
-    // Step 3: Generate infographic with gpt-image-1
-    const infographicPrompt = `Create a beautiful lipstick recommendation infographic (9:16 vertical format, 1080x1920px).
+    // Step 2: Generate infographic with Doubao Seedream
+    const infographicPrompt = `高端美妆口红推荐信息图，9:16竖版，1080x1920px。
 
-Style: Luxury beauty brand aesthetic, soft pink/rose gold color palette, elegant serif fonts, clean modern layout.
+风格：奢侈品美妆品牌美学，柔和的粉色/玫瑰金色调，优雅衬线字体，干净现代布局，高级感与女性审美友好。
 
-Content:
-- Title: "💄 专属口红推荐" at top
-- User Analysis Section:
-  - Skin tone: ${analysis.skinTone || '分析中'}
-  - Brightness: ${analysis.brightness || '分析中'}
-  - Vibe: ${analysis.vibe || '分析中'}
-  - Lip base: ${analysis.lipBase || '分析中'}
-  - Summary: "${summary}"
+内容：
+- 顶部标题："💄 专属口红推荐" 
+- 用户分析区：
+  · 肤色：${analysis.skinTone || '分析中'}
+  · 明度：${analysis.brightness || '分析中'}
+  · 气质：${analysis.vibe || '分析中'}
+  · 唇部基础：${analysis.lipBase || '分析中'}
+  · 总结："${summary}"
 
-- Brand: ${brand.toUpperCase()}
-- Recommend 4 shades with:
-  - Shade number and name
-  - Color swatch (use the exact hex colors)
-  - Effect description
-  - Scene recommendation
+- 品牌：${brandName}
+- 推荐4个色号，每个包含：
+  · 色号编号和名称
+  · 色块展示（用实际颜色）
+  · 上脸效果
+  · 适用场景
 
-Shades to include:
-${selectedShades.map((s, i) => `${i+1}. ${s.number} ${s.name} (${s.color}) - ${s.effect} - ${s.scene}`).join('\n')}
+推荐色号：
+${recommendations.map((s: any, i: number) => `${i+1}. ${s.number} ${s.name} (${s.color || '#C41E3A'}) - ${s.effect} - ${s.scene}`).join('\n')}
 
-Design requirements:
-- Soft gradient background (pink to cream)
-- Elegant typography
-- Color swatches shown as circles with actual colors
-- Clean card-based layout for each shade
-- Small icons for effects and scenes
-- Bottom: "Powered by AI" subtle text`
+设计要求：
+· 柔和渐变背景（粉色到奶油色）
+· 优雅排版
+· 色块用圆形展示实际颜色
+· 卡片式布局展示每个色号
+· 底部 subtle "Powered by AI" 文字`
 
-    const imageResponse = await openai.images.generate({
-      model: 'gpt-image-1',
-      prompt: infographicPrompt,
-      n: 1,
-      size: '1024x1792', // 9:16 portrait
+    const imageResponse = await fetch('https://ark.cn-beijing.volces.com/api/v3/images/generations', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.DOUBAO_API_KEY || ''}`,
+      },
+      body: JSON.stringify({
+        model: 'doubao-seedream-4-5-251128',
+        prompt: infographicPrompt,
+        sequential_image_generation: 'disabled',
+        response_format: 'url',
+        size: '2K',
+        stream: false,
+        watermark: true,
+      })
     })
 
-    const infographicUrl = imageResponse.data?.[0]?.url || ''
+    if (!imageResponse.ok) {
+      const errorData = await imageResponse.text()
+      throw new Error(`图片生成失败: ${errorData}`)
+    }
+
+    const imageData = await imageResponse.json()
+    const infographicUrl = imageData.data?.[0]?.url || ''
 
     return NextResponse.json({
       analysis: summary,
-      recommendations: selectedShades,
+      recommendations: recommendations,
       infographicUrl,
     })
 
