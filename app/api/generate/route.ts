@@ -154,7 +154,7 @@ ${shadesText}
         'Authorization': `Bearer ${process.env.DOUBAO_API_KEY || ''}`,
       },
       body: JSON.stringify({
-        model: 'doubao-vision-pro-32k-241028',
+        model: 'doubao-1-5-vision-pro-32k-250115',
         messages: [
           {
             role: 'system',
